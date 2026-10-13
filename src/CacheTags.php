@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GeneaLabs\LaravelModelCaching;
 
+use GeneaLabs\LaravelModelCaching\Cache\ModelCacheRepository;
 use GeneaLabs\LaravelModelCaching\Traits\CachePrefixing;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
@@ -319,22 +320,41 @@ class CacheTags
         $column = last(explode('.', $morphType));
         $table = $relation->getParent()->getTable();
 
-        return $relation->getParent()
-            ->newQuery()
-            ->getQuery()
-            ->select($column)
-            ->from($table)
-            ->whereNotNull($column)
-            ->distinct()
-            ->pluck($column)
-            ->map(fn ($type) => Relation::getMorphedModel($type) ?? $type)
-            ->filter(fn ($resolved) => class_exists($resolved))
-            ->map(fn ($resolved) => $this->getCachePrefix() . (new Str)->slug($resolved))
-            ->values()
-            ->all();
+        $types = $this->getMorphTypesInUse($relation, $table, $column);
+
+        $tags = [];
+
+        foreach ($types as $type) {
+            $resolved = Relation::getMorphedModel($type) ?? $type;
+
+            if (class_exists($resolved)) {
+                $tags[] = $this->getCachePrefix() . (new Str)->slug($resolved);
+            }
+        }
+
+        return $tags;
     }
 
-    protected function getTagName(): string
+    protected function getMorphTypesInUse(MorphTo $relation, string $table, string $column) : array
+    {
+        return ModelCacheRepository::make()->rememberForever(
+            $this->getCachePrefix() . "morph-types:" . $table . ":" . $column,
+            $this->makeTableTags([["table" => $table, "model" => $relation->getParent()]]),
+            static function () use ($relation, $table, $column) : array {
+                return $relation->getParent()
+                    ->newQuery()
+                    ->getQuery()
+                    ->select($column)
+                    ->from($table)
+                    ->whereNotNull($column)
+                    ->distinct()
+                    ->pluck($column)
+                    ->toArray();
+            },
+        );
+    }
+
+    protected function getTagName() : string
     {
         return $this->getCachePrefix()
             . (new Str)->slug(get_class($this->model));
