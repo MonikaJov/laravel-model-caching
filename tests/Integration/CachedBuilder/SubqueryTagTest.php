@@ -33,6 +33,17 @@ test('has with a relation instance tags the related table', function () {
     );
 });
 
+test('subquery join tags the joined table', function () {
+    assertCachedUnderTags(
+        (new Book)->whereHas("stores"),
+        [
+            ...bookTags(),
+            tagPrefix() . "stores",
+            tagPrefix() . "book-store",
+        ],
+    );
+});
+
 test('zero count has tags the related table', function () {
     assertCachedUnderTags(
         (new Author)->has("books", "=", 0),

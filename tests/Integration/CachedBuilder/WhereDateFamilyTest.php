@@ -45,6 +45,9 @@ test('where year where time and where produce three different cache keys', funct
 });
 
 test('where date returns its own results after where was cached', function () {
+    (new UncachedBook)
+        ->newQuery()
+        ->update(["published_at" => "2019-06-15 13:45:00"]);
     $book = (new UncachedBook)->first();
     $book->published_at = "2020-01-05 13:45:00";
     $book->save();

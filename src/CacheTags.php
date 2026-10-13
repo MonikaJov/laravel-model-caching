@@ -190,32 +190,25 @@ class CacheTags
             ->merge(collect($builder->wheres ?? [])
                 ->flatMap(function ($where) use ($seen) {
                     return $this->getSubqueryTablesFromWhere($where, $seen);
-                })
-                ->toArray(),
-        );
-
-        foreach ($builder->joins ?? [] as $join) {
-            if (is_string($join->table ?? null)) {
-                $tables[] = [
-                    "table" => $this->stripTableAlias($join->table),
-                    "model" => null,
-                ];
-            }
-
-            foreach ($join->wheres ?? [] as $where) {
-                $tables = array_merge($tables, $this->getSubqueryTablesFromWhere($where, $seen));
-            }
-        }
-
-        foreach ($builder->unions ?? [] as $union) {
-            $unionQuery = $union['query'] ?? null;
-
-            if (is_object($unionQuery)) {
-                $tables = array_merge($tables, $this->getSubqueryTablesFromBuilder($unionQuery, $seen));
-            }
-        }
-
-        return $tables;
+                }))
+            ->merge(collect($builder->joins ?? [])
+                ->flatMap(fn ($join) => collect([$join->table ?? null])
+                    ->filter(fn ($table) => is_string($table))
+                    ->map(fn (string $table) => [
+                        "table" => $this->stripTableAlias($table),
+                        "model" => null,
+                    ])
+                    ->merge(collect($join->wheres ?? [])
+                        ->flatMap(function ($where) use ($seen) {
+                            return $this->getSubqueryTablesFromWhere($where, $seen);
+                        }))))
+            ->merge(collect($builder->unions ?? [])
+                ->map(fn ($union) => $union['query'] ?? null)
+                ->filter(fn ($unionQuery) => is_object($unionQuery))
+                ->flatMap(function ($unionQuery) use ($seen) {
+                    return $this->getSubqueryTablesFromBuilder($unionQuery, $seen);
+                }))
+            ->all();
     }
 
     protected function getSubqueryTablesFromWhere(array $where, SplObjectStorage $seen): array

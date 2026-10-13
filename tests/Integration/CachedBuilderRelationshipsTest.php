@@ -14,6 +14,7 @@ test('has relationship results', function () {
         "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesstore",
         "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:books",
         "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:stores",
+        "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:book-store",
     ];
     $cachedResults = $this
         ->cache()
