@@ -43,19 +43,16 @@ trait ModelCaching
         }
     }
 
-    protected function newBaseQueryBuilder(): QueryBuilder
+    protected function useModelCachingQueryBuilder(mixed $query): mixed
     {
-        $builder = parent::newBaseQueryBuilder();
-
-        if ($builder::class !== QueryBuilder::class) {
-            return $builder;
+        if (
+            ! is_object($query)
+            || $query::class !== QueryBuilder::class
+        ) {
+            return $query;
         }
 
-        return new CachedQueryBuilder(
-            $builder->getConnection(),
-            $builder->getGrammar(),
-            $builder->getProcessor(),
-        );
+        return CachedQueryBuilder::fromBase($query);
     }
 
     public function __get($key): mixed
@@ -167,6 +164,11 @@ trait ModelCaching
 
     public function newModelCachingEloquentBuilder($query): Builder
     {
+        // Done here rather than in newEloquentBuilder() so a model that
+        // resolves a newEloquentBuilder() collision by delegating to this
+        // method still gets the recording query builder.
+        $query = $this->useModelCachingQueryBuilder($query);
+
         if (! $this->isCachable()) {
             $this->isCachable = false;
 

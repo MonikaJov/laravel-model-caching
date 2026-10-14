@@ -16,6 +16,21 @@ class CachedQueryBuilder extends Builder
 
     protected array $relatedSubqueryTables = [];
 
+    public static function fromBase(Builder $query): self
+    {
+        $builder = new self(
+            $query->getConnection(),
+            $query->getGrammar(),
+            $query->getProcessor(),
+        );
+
+        foreach (get_object_vars($query) as $property => $value) {
+            $builder->{$property} = $value;
+        }
+
+        return $builder;
+    }
+
     public function getJoinedSubqueryTables(): array
     {
         return $this->joinedSubqueryTables;

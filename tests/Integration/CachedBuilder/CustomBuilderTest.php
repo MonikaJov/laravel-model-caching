@@ -1,7 +1,9 @@
 <?php
 
 use GeneaLabs\LaravelModelCaching\CachedBuilder;
+use GeneaLabs\LaravelModelCaching\CachedQueryBuilder;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\AuthorCachedQueryBuilder;
+use GeneaLabs\LaravelModelCaching\Tests\Fixtures\AuthorDelegatingToModelCaching;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\AuthorExtendingGenerated;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\AuthorQueryBuilder;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\AuthorWithCachedCustomBuilder;
@@ -133,6 +135,16 @@ test('trait collision resolves without fatal error', function () {
     expect($builder)->toBeInstanceOf(
         CachedBuilder::class,
         'Model with trait collision resolved via insteadof must return a CachedBuilder',
+    );
+});
+
+test('delegating to model caching keeps the recording query builder', function () {
+    $builder = (new AuthorDelegatingToModelCaching)->newQuery();
+
+    expect($builder)->toBeInstanceOf(CachedBuilder::class);
+    expect($builder->getQuery())->toBeInstanceOf(
+        CachedQueryBuilder::class,
+        'A model delegating to newModelCachingEloquentBuilder() must still record subquery join tables',
     );
 });
 

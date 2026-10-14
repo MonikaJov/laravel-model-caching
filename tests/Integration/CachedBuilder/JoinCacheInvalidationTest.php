@@ -4,6 +4,7 @@ use GeneaLabs\LaravelModelCaching\CachedQueryBuilder;
 use GeneaLabs\LaravelModelCaching\CacheTags;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\Author;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\AuthorBaseQueryBuilder;
+use GeneaLabs\LaravelModelCaching\Tests\Fixtures\AuthorWithBaseBuilderTrait;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\AuthorWithCustomBaseBuilder;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\Book;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\CachableRoleUser;
@@ -337,18 +338,32 @@ test('deferred join sub query cache is invalidated when the subquery table is wr
 });
 
 test('a custom base query builder is not replaced', function () {
-    $builder = (new ReflectionMethod(new AuthorWithCustomBaseBuilder, 'newBaseQueryBuilder'))
-        ->invoke(new AuthorWithCustomBaseBuilder);
+    $builder = (new AuthorWithCustomBaseBuilder)->newQuery()->getQuery();
 
     expect($builder)->toBeInstanceOf(AuthorBaseQueryBuilder::class);
     expect($builder)->not->toBeInstanceOf(CachedQueryBuilder::class);
 });
 
 test('the default base query builder is the recording one', function () {
-    $builder = (new ReflectionMethod(new Author, 'newBaseQueryBuilder'))
-        ->invoke(new Author);
+    $builder = (new Author)->newQuery()->getQuery();
 
     expect($builder)->toBeInstanceOf(CachedQueryBuilder::class);
+});
+
+test('cachable combines with a trait defining new base query builder', function () {
+    $builder = (new AuthorWithBaseBuilderTrait)->newQuery()->getQuery();
+
+    expect($builder)->toBeInstanceOf(AuthorBaseQueryBuilder::class);
+
+    $authors = (new AuthorWithBaseBuilderTrait)->where('id', '<', 5)->get();
+
+    DB::enableQueryLog();
+    DB::flushQueryLog();
+    $cached = (new AuthorWithBaseBuilderTrait)->where('id', '<', 5)->get();
+
+    expect($authors)->not->toBeEmpty();
+    expect($cached->pluck('id'))->toEqual($authors->pluck('id'));
+    expect(DB::getQueryLog())->toBe([], 'The second read should be served from the cache');
 });
 
 test('of many relation builds cache tags without raising a type error', function () {
