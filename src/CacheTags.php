@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GeneaLabs\LaravelModelCaching;
 
+use GeneaLabs\LaravelModelCaching\Cache\ModelCacheRepository;
 use GeneaLabs\LaravelModelCaching\Traits\CachePrefixing;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
@@ -16,6 +17,8 @@ use Throwable;
 class CacheTags
 {
     use CachePrefixing;
+
+    protected int $morphTypesTtlSeconds = 60;
 
     protected $eagerLoad;
     protected $model;
@@ -127,10 +130,9 @@ class CacheTags
             return [];
         }
 
-        return array_merge(
-            $baseQuery->getJoinedSubqueryTables(),
-            $this->getDeferredJoinedSubqueryTables($baseQuery),
-        );
+        return collect($baseQuery->getJoinedSubqueryTables())
+            ->merge($this->getDeferredJoinedSubqueryTables($baseQuery))
+            ->all();
     }
 
     protected function getDeferredJoinedSubqueryTables(mixed $baseQuery): array
@@ -186,32 +188,41 @@ class CacheTags
             ? $builder->getRelatedSubqueryTables()
             : [];
 
-        $tables = array_merge(
-            $tables,
-            collect($builder->wheres ?? [])
+        return collect($tables)
+            ->merge(collect($builder->wheres ?? [])
                 ->flatMap(function ($where) use ($seen) {
                     return $this->getSubqueryTablesFromWhere($where, $seen);
-                })
-                ->toArray(),
-        );
-
-        foreach ($builder->joins ?? [] as $join) {
-            foreach ($join->wheres ?? [] as $where) {
-                $tables = array_merge($tables, $this->getSubqueryTablesFromWhere($where, $seen));
-            }
-        }
-
-        foreach ($builder->unions ?? [] as $union) {
-            $unionQuery = $union['query'] ?? null;
-
-            if (! is_object($unionQuery)) {
-                continue;
-            }
-
-            $tables = array_merge($tables, $this->getSubqueryTablesFromBuilder($unionQuery, $seen));
-        }
-
-        return $tables;
+                }))
+            // A joined table, such as a pivot, is recorded with no model, so its tag takes the
+            // querying model's prefix, as in getJoinTags(). A pivot on another connection or
+            // with its own $cachePrefix is tagged under a prefix its own writes never flush.
+            // This runs on the outer query's joins too, because getSubqueryWhereTags() passes
+            // resolveBaseQuery(), not only on joins nested inside a subquery.
+            ->merge(collect($builder->joins ?? [])
+                ->flatMap(fn ($join) => collect([$join->table ?? null])
+                    ->filter(fn ($table) => is_string($table))
+                    ->map(fn (string $table) => [
+                        "table" => $this->stripTableAlias($table),
+                        "model" => null,
+                    ])
+                    ->merge(collect($join->wheres ?? [])
+                        ->flatMap(function ($where) use ($seen) {
+                            return $this->getSubqueryTablesFromWhere($where, $seen);
+                        }))))
+            ->merge(collect([$builder])
+                ->filter(fn ($builder) => method_exists($builder, "getJoinedSubqueryTables"))
+                ->flatMap(fn ($builder) => $builder->getJoinedSubqueryTables())
+                ->map(fn (string $table) => [
+                    "table" => $table,
+                    "model" => null,
+                ]))
+            ->merge(collect($builder->unions ?? [])
+                ->map(fn ($union) => $union['query'] ?? null)
+                ->filter(fn ($unionQuery) => is_object($unionQuery))
+                ->flatMap(function ($unionQuery) use ($seen) {
+                    return $this->getSubqueryTablesFromBuilder($unionQuery, $seen);
+                }))
+            ->all();
     }
 
     protected function getSubqueryTablesFromWhere(array $where, SplObjectStorage $seen): array
@@ -238,7 +249,9 @@ class CacheTags
             ];
         }
 
-        return array_merge($tables, $this->getSubqueryTablesFromBuilder($query, $seen));
+        return collect($tables)
+            ->merge($this->getSubqueryTablesFromBuilder($query, $seen))
+            ->all();
     }
 
     // phpcs:ignore SlevomatCodingStandard.TypeHints.ParameterTypeHint.MissingAnyTypeHint
@@ -259,7 +272,10 @@ class CacheTags
                 $carry = $carry ?: $this->model;
                 $carry = $this->getRelatedModel($carry);
 
-                if (! method_exists($carry, $name)) {
+                if (
+                    ! method_exists($carry, $name)
+                    && ! $carry->isRelation($name)
+                ) {
                     return null;
                 }
 
@@ -280,7 +296,10 @@ class CacheTags
         $model = $this->model;
 
         foreach ($segments as $segment) {
-            if (! method_exists($model, $segment)) {
+            if (
+                ! method_exists($model, $segment)
+                && ! $model->isRelation($segment)
+            ) {
                 return null;
             }
 
@@ -306,15 +325,11 @@ class CacheTags
         $morphMap = Relation::morphMap();
 
         if ($morphMap) {
-            $tags = [];
-
-            foreach ($morphMap as $type) {
-                if (! class_exists($type)) {
-                    continue;
-                }
-
-                $tags[] = $this->getCachePrefix() . (new Str)->slug($type);
-            }
+            $tags = collect($morphMap)
+                ->filter(fn ($type) => class_exists($type))
+                ->map(fn ($type) => $this->getCachePrefix() . (new Str)->slug($type))
+                ->values()
+                ->all();
 
             if ($tags) {
                 return $tags;
@@ -325,32 +340,44 @@ class CacheTags
         $column = last(explode('.', $morphType));
         $table = $relation->getParent()->getTable();
 
-        $types = $relation->getParent()
-            ->newQuery()
-            ->getQuery()
-            ->select($column)
-            ->from($table)
-            ->whereNotNull($column)
-            ->distinct()
-            ->pluck($column)
-            ->toArray();
+        $types = $this->getMorphTypesInUse($relation, $table, $column);
 
         $tags = [];
 
         foreach ($types as $type) {
             $resolved = Relation::getMorphedModel($type) ?? $type;
 
-            if (! class_exists($resolved)) {
-                continue;
+            if (class_exists($resolved)) {
+                $tags[] = $this->getCachePrefix() . (new Str)->slug($resolved);
             }
-
-            $tags[] = $this->getCachePrefix() . (new Str)->slug($resolved);
         }
 
         return $tags;
     }
 
-    protected function getTagName(): string
+    protected function getMorphTypesInUse(MorphTo $relation, string $table, string $column) : array
+    {
+        $owner = $relation->getParent();
+
+        return ModelCacheRepository::make()->remember(
+            $this->getCachePrefixForModel($owner) . "morph-types:" . $table . ":" . $column,
+            $this->makeTableTags([["table" => $table, "model" => $owner]]),
+            $this->morphTypesTtlSeconds,
+            static function () use ($relation, $table, $column) : array {
+                return $relation->getParent()
+                    ->newQuery()
+                    ->getQuery()
+                    ->select($column)
+                    ->from($table)
+                    ->whereNotNull($column)
+                    ->distinct()
+                    ->pluck($column)
+                    ->toArray();
+            },
+        );
+    }
+
+    protected function getTagName() : string
     {
         return $this->getCachePrefix()
             . (new Str)->slug(get_class($this->model));

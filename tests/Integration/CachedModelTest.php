@@ -1,4 +1,4 @@
-<?php namespace GeneaLabs\LaravelModelCaching\Tests\Integration;
+<?php
 
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\Author;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\AuthorWithCooldown;
@@ -6,271 +6,293 @@ use GeneaLabs\LaravelModelCaching\Tests\Fixtures\AuthorWithTtl;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\Book;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\PrefixedAuthor;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\UncachedAuthor;
-use GeneaLabs\LaravelModelCaching\Tests\IntegrationTestCase;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
-use ReflectionClass;
 
-class CachedModelTest extends IntegrationTestCase
-{
-    public function testAllModelResultsCreatesCache()
-    {
-        $authors = (new Author)->all();
-        $key = sha1("genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:authors:genealabslaravelmodelcachingtestsfixturesauthor-authors.deleted_at_null");
-        $tags = [
-            "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesauthor",
-            "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:authors",
-        ];
+test('all model results creates cache', function () {
+    $authors = (new Author)->all();
+    $key = sha1("genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:authors:genealabslaravelmodelcachingtestsfixturesauthor-authors.deleted_at_null");
+    $tags = [
+        "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesauthor",
+        "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:authors",
+    ];
 
-        $cachedResults = $this
-            ->cache()
-            ->tags($tags)
-            ->get($key)['value'];
-        $liveResults = (new UncachedAuthor)
-            ->all();
+    $cachedResults = $this
+        ->cache()
+        ->tags($tags)
+        ->get($key)['value'];
+    $liveResults = (new UncachedAuthor)
+        ->all();
 
-        $this->assertEquals($authors, $cachedResults);
-        $this->assertEmpty($liveResults->diffAssoc($cachedResults));
-    }
+    expect($cachedResults)->toEqual($authors);
+    expect($liveResults->diffAssoc($cachedResults))->toBeEmpty();
+});
 
-    public function testScopeDisablesCaching()
-    {
-        $key = sha1("genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:authors:genealabslaravelmodelcachingtestsfixturesauthor");
-        $tags = ["genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesauthor"];
-        $authors = (new Author)
-            ->where("name", "Bruno")
-            ->disableCache()
-            ->get();
+test('scope disables caching', function () {
+    $key = sha1("genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:authors:genealabslaravelmodelcachingtestsfixturesauthor");
+    $tags = ["genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesauthor"];
+    $authors = (new Author)
+        ->where("name", "Bruno")
+        ->disableCache()
+        ->get();
 
-        $cachedResults = $this->cache()
-            ->tags($tags)
-            ->get($key)['value']
-            ?? null;
+    $cachedResults = $this->cache()
+        ->tags($tags)
+        ->get($key)['value']
+        ?? null;
 
-        $this->assertNull($cachedResults);
-        $this->assertNotEquals($authors, $cachedResults);
-    }
+    expect($cachedResults)->toBeNull();
+    expect($cachedResults)->not->toEqual($authors);
+});
 
-    public function testScopeDisablesCachingWhenCalledOnModel()
-    {
-        $key = sha1("genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:test-prefix:authors:genealabslaravelmodelcachingtestsfixturesauthor");
-        $tags = ["genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:test-prefix:genealabslaravelmodelcachingtestsfixturesauthor"];
-        $authors = (new PrefixedAuthor)
-            ->disableCache()
-            ->where("name", "Bruno")
-            ->get();
+test('scope disables caching when called on model', function () {
+    $key = sha1("genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:test-prefix:authors:genealabslaravelmodelcachingtestsfixturesauthor");
+    $tags = ["genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:test-prefix:genealabslaravelmodelcachingtestsfixturesauthor"];
+    $authors = (new PrefixedAuthor)
+        ->disableCache()
+        ->where("name", "Bruno")
+        ->get();
 
-        $cachedResults = $this->cache()
-            ->tags($tags)
-            ->get($key)['value']
-            ?? null;
+    $cachedResults = $this->cache()
+        ->tags($tags)
+        ->get($key)['value']
+        ?? null;
 
-        $this->assertNull($cachedResults);
-        $this->assertNotEquals($authors, $cachedResults);
-    }
+    expect($cachedResults)->toBeNull();
+    expect($cachedResults)->not->toEqual($authors);
+});
 
-    public function testScopeDisableCacheDoesntCrashWhenCachingIsDisabledInConfig()
-    {
-        config(['laravel-model-caching.enabled' => false]);
-        $key = sha1("genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:test-prefix:authors:genealabslaravelmodelcachingtestsfixturesauthor");
-        $tags = ["genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:test-prefix:genealabslaravelmodelcachingtestsfixturesauthor"];
-        $authors = (new PrefixedAuthor)
-            ->where("name", "Bruno")
-            ->disableCache()
-            ->get();
+test('scope disable cache doesnt crash when caching is disabled in config', function () {
+    config(['laravel-model-caching.enabled' => false]);
+    $key = sha1("genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:test-prefix:authors:genealabslaravelmodelcachingtestsfixturesauthor");
+    $tags = ["genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:test-prefix:genealabslaravelmodelcachingtestsfixturesauthor"];
+    $authors = (new PrefixedAuthor)
+        ->where("name", "Bruno")
+        ->disableCache()
+        ->get();
 
-        $cachedResults = $this->cache()
-            ->tags($tags)
-            ->get($key)['value']
-            ?? null;
+    $cachedResults = $this->cache()
+        ->tags($tags)
+        ->get($key)['value']
+        ?? null;
 
-        $this->assertNull($cachedResults);
-        $this->assertNotEquals($authors, $cachedResults);
-    }
+    expect($cachedResults)->toBeNull();
+    expect($cachedResults)->not->toEqual($authors);
+});
 
-    public function testAllMethodCachingCanBeDisabledViaConfig()
-    {
-        config(['laravel-model-caching.enabled' => false]);
-        $authors = (new Author)
-            ->all();
-        $key = sha1("genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:authors:genealabslaravelmodelcachingtestsfixturesauthor.deleted_at_null");
-        $tags = [
-            "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesauthor",
-            "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:authors",
-        ];
-        config(['laravel-model-caching.enabled' => true]);
+test('all method caching can be disabled via config', function () {
+    config(['laravel-model-caching.enabled' => false]);
+    $authors = (new Author)
+        ->all();
+    $key = sha1("genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:authors:genealabslaravelmodelcachingtestsfixturesauthor.deleted_at_null");
+    $tags = [
+        "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesauthor",
+        "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:authors",
+    ];
+    config(['laravel-model-caching.enabled' => true]);
 
-        $cachedResults = $this
-            ->cache()
-            ->tags($tags)
-            ->get($key)['value']
-            ?? null;
+    $cachedResults = $this
+        ->cache()
+        ->tags($tags)
+        ->get($key)['value']
+        ?? null;
 
-        $this->assertEmpty($cachedResults);
-        $this->assertNotEmpty($authors);
-        $this->assertCount(10, $authors);
-    }
+    expect($cachedResults)->toBeEmpty();
+    expect($authors)->not->toBeEmpty();
+    expect($authors)->toHaveCount(10);
+});
 
-    public function testWhereHasIsBeingCached()
-    {
-        $books = (new Book)
-            ->with('author')
-            ->whereHas('author', function ($query) {
-                $query->whereId('1');
-            })
-            ->get();
+test('where has is being cached', function () {
+    $books = (new Book)
+        ->with('author')
+        ->whereHas('author', function ($query) {
+            $query->whereId('1');
+        })
+        ->get();
 
-        $key = sha1("genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:books:genealabslaravelmodelcachingtestsfixturesbook-exists-books.author_id_=_authors.id-id_=_1-authors.deleted_at_null-testing:{$this->testingSqlitePath}testing.sqlite:author");
-        $tags = [
-            "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesbook",
-            "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesauthor",
-            "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:books",
-            "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:authors",
-        ];
+    $key = sha1("genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:books:genealabslaravelmodelcachingtestsfixturesbook-exists-books.author_id_=_authors.id-id_=_1-authors.deleted_at_null-testing:{$this->testingSqlitePath}testing.sqlite:author");
+    $tags = [
+        "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesbook",
+        "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesauthor",
+        "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:books",
+        "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:authors",
+    ];
 
-        $cachedResults = $this
-            ->cache()
-            ->tags($tags)
-            ->get($key)['value'];
+    $cachedResults = $this
+        ->cache()
+        ->tags($tags)
+        ->get($key)['value'];
 
-        $this->assertEquals(1, $books->first()->author->id);
-        $this->assertEquals(1, $cachedResults->first()->author->id);
-    }
+    expect($books->first()->author->id)->toEqual(1);
+    expect($cachedResults->first()->author->id)->toEqual(1);
+});
 
-    public function testWhereHasWithClosureIsBeingCached()
-    {
-        $books1 = (new Book)
-            ->with('author')
-            ->whereHas('author', function ($query) {
-                $query->whereId(1);
-            })
-            ->get()
-            ->keyBy('id');
-        $books2 = (new Book)
-            ->with('author')
-            ->whereHas('author', function ($query) {
-                $query->whereId(2);
-            })
-            ->get()
-            ->keyBy('id');
+test('where has with closure is being cached', function () {
+    $books1 = (new Book)
+        ->with('author')
+        ->whereHas('author', function ($query) {
+            $query->whereId(1);
+        })
+        ->get()
+        ->keyBy('id');
+    $books2 = (new Book)
+        ->with('author')
+        ->whereHas('author', function ($query) {
+            $query->whereId(2);
+        })
+        ->get()
+        ->keyBy('id');
 
-        $this->assertNotEmpty($books1->diffKeys($books2));
-    }
+    expect($books1->diffKeys($books2))->not->toBeEmpty();
+});
 
-    public function testCooldownIsNotQueriedForNormalCachedModels()
-    {
-        $class = new ReflectionClass(Author::class);
-        $method = $class->getMethod('getModelCacheCooldown');
-        $author = (new Author)
-            ->first();
+test('cooldown is not queried for normal cached models', function () {
+    $class = new ReflectionClass(Author::class);
+    $method = $class->getMethod('getModelCacheCooldown');
+    $author = (new Author)
+        ->first();
 
-        $this->assertEquals([null, null, null], $method->invokeArgs($author, [$author]));
-    }
+    expect($method->invokeArgs($author, [$author]))->toEqual([null, null, null]);
+});
 
-    public function testCooldownIsQueriedForCooldownModels()
-    {
-        $class = new ReflectionClass(AuthorWithCooldown::class);
-        $method = $class->getMethod('getModelCacheCooldown');
-        $author = (new AuthorWithCooldown)
-            ->withCacheCooldownSeconds(1)
-            ->first();
+test('cooldown is queried for cooldown models', function () {
+    $class = new ReflectionClass(AuthorWithCooldown::class);
+    $method = $class->getMethod('getModelCacheCooldown');
+    $author = (new AuthorWithCooldown)
+        ->withCacheCooldownSeconds(1)
+        ->first();
 
-        [$usesCacheCooldown, $expiresAt, $savedAt] = $method->invokeArgs($author, [$author]);
+    [$usesCacheCooldown, $expiresAt, $savedAt] = $method->invokeArgs($author, [$author]);
 
-        $this->assertEquals($usesCacheCooldown, 1);
-        $this->assertEquals("Illuminate\Support\Carbon", get_class($expiresAt));
-        $this->assertNull($savedAt);
-    }
+    expect(1)->toEqual($usesCacheCooldown);
+    expect(get_class($expiresAt))->toEqual("Illuminate\Support\Carbon");
+    expect($savedAt)->toBeNull();
+});
 
-    public function testModelCacheDoesntInvalidateDuringCooldownPeriod()
-    {
-        $authors = (new AuthorWithCooldown)
-            ->withCacheCooldownSeconds(1)
-            ->get();
+test('model cache doesnt invalidate during cooldown period', function () {
+    $authors = (new AuthorWithCooldown)
+        ->withCacheCooldownSeconds(1)
+        ->get();
 
-        Author::factory()->count(1)->create();
-        $authorsDuringCooldown = (new AuthorWithCooldown)
-            ->get();
-        $uncachedAuthors = (new UncachedAuthor)
-            ->get();
-        sleep(3);
-        $authorsAfterCooldown = (new AuthorWithCooldown)
-            ->get();
+    Author::factory()->count(1)->create();
+    $authorsDuringCooldown = (new AuthorWithCooldown)
+        ->get();
+    $uncachedAuthors = (new UncachedAuthor)
+        ->get();
+    sleep(3);
+    $authorsAfterCooldown = (new AuthorWithCooldown)
+        ->get();
 
-        $this->assertCount(10, $authors);
-        // Creating via Author flushes the shared "authors" table tag,
-        // which also invalidates AuthorWithCooldown's cache.
-        $this->assertCount(11, $authorsDuringCooldown);
-        $this->assertCount(11, $uncachedAuthors);
-        $this->assertCount(11, $authorsAfterCooldown);
-    }
+    expect($authors)->toHaveCount(10);
+    expect($authorsDuringCooldown)->toHaveCount(11);
+    expect($uncachedAuthors)->toHaveCount(11);
+    expect($authorsAfterCooldown)->toHaveCount(11);
+});
 
-    public function testModelCacheDoesInvalidateWhenNoCooldownPeriod()
-    {
-        $authors = (new AuthorWithCooldown)
-            ->get();
+test('model cache does invalidate when no cooldown period', function () {
+    $authors = (new AuthorWithCooldown)
+        ->get();
 
-        Author::factory()->count(1)->create();
-        $authorsAfterCreate = (new Author)
-            ->get();
-        $uncachedAuthors = (new UncachedAuthor)
-            ->get();
+    Author::factory()->count(1)->create();
+    $authorsAfterCreate = (new Author)
+        ->get();
+    $uncachedAuthors = (new UncachedAuthor)
+        ->get();
 
-        $this->assertCount(10, $authors);
-        $this->assertCount(11, $authorsAfterCreate);
-        $this->assertCount(11, $uncachedAuthors);
-    }
+    expect($authors)->toHaveCount(10);
+    expect($authorsAfterCreate)->toHaveCount(11);
+    expect($uncachedAuthors)->toHaveCount(11);
+});
 
-    protected function countSelectQueriesForTable(string $table, callable $callback): int
-    {
-        $queryCount = 0;
+test('flushing a cooldown model records when it was saved', function () {
+    $method = (new ReflectionClass(AuthorWithCooldown::class))->getMethod('getModelCacheCooldown');
+    $author = (new AuthorWithCooldown)
+        ->withCacheCooldownSeconds(30)
+        ->first();
 
-        DB::listen(function ($query) use (&$queryCount, $table) {
-            if (
-                str_starts_with(strtolower(trim($query->sql)), "select")
-                && str_contains($query->sql, $table)
-            ) {
-                $queryCount++;
-            }
-        });
+    expect($method->invokeArgs($author, [$author])[2])->toBeNull();
 
-        $callback();
+    $author->flushCache();
+    [$usesCacheCooldown, , $savedAt] = $method->invokeArgs($author, [$author]);
 
-        return $queryCount;
-    }
+    expect($usesCacheCooldown)->toEqual(30)
+        ->and($savedAt)->toBeInstanceOf(Carbon::class);
+});
 
-    public function testGlobalTtlExpiresCacheAfterConfiguredSeconds()
-    {
-        config(['laravel-model-caching.ttl' => 1]);
+test('cooldown seconds default to the model setting', function () {
+    $method = (new ReflectionClass(AuthorWithCooldown::class))->getMethod('getModelCacheCooldown');
+    $author = new AuthorWithCooldown;
+    $author->cacheCooldownSeconds = 7;
 
-        $authors = (new Author)->get();
+    $author->newQuery()->withCacheCooldownSeconds();
 
-        sleep(2);
+    expect($author->cacheCooldownSeconds)->toBe(7)
+        ->and($method->invokeArgs($author, [$author])[0])->toEqual(7);
+});
 
-        $queryCount = $this->countSelectQueriesForTable("authors", function () {
-            (new Author)->get();
-        });
+test('a cache prefix set at runtime keys the model queries', function () {
+    $author = new PrefixedAuthor;
+    $author->cachePrefix = 'runtime-prefix';
 
-        $this->assertCount(10, $authors);
-        $this->assertGreaterThan(0, $queryCount, "Expected a fresh database hit after the global TTL expired");
-    }
+    $query = $author->newQuery();
+    $key = cacheKey($query);
+    $tags = (new ReflectionMethod($query, 'makeCacheTags'))->invoke($query);
 
-    public function testPerModelTtlOverridesLongerGlobalTtl()
-    {
-        config(['laravel-model-caching.ttl' => 100]);
+    $authors = $query->get();
+    $cached = $this->cache()->tags($tags)->get(sha1($key));
 
-        $authors = (new AuthorWithTtl)->get();
+    expect($author->cachePrefix)->toBe('runtime-prefix')
+        ->and($cached['key'])->toBe($key)
+        ->and($cached['key'])->toContain(':runtime-prefix:authors:')
+        ->and($cached['key'])->not->toContain('model-prefix')
+        ->and($cached['value']->pluck('id'))->toEqual($authors->pluck('id'));
+});
 
-        sleep(2);
+test('global ttl expires cache after configured seconds', function () {
+    config(['laravel-model-caching.ttl' => 1]);
 
-        $queryCount = $this->countSelectQueriesForTable("authors", function () {
-            (new AuthorWithTtl)->get();
-        });
+    $authors = (new Author)->get();
 
-        $this->assertCount(10, $authors);
-        $this->assertGreaterThan(
-            0,
-            $queryCount,
-            "Expected the per-model TTL to expire the cache despite a much longer global TTL",
-        );
-    }
-}
+    sleep(2);
+
+    $queryCount = 0;
+    DB::listen(function ($query) use (&$queryCount) {
+        if (
+            str_starts_with(strtolower(trim($query->sql)), "select")
+            && str_contains($query->sql, "authors")
+        ) {
+            $queryCount++;
+        }
+    });
+
+    (new Author)->get();
+
+    expect($authors)->toHaveCount(10);
+    expect($queryCount)->toBeGreaterThan(0, "Expected a fresh database hit after the global TTL expired");
+});
+
+test('per model ttl overrides longer global ttl', function () {
+    config(['laravel-model-caching.ttl' => 100]);
+
+    $authors = (new AuthorWithTtl)->get();
+
+    sleep(2);
+
+    $queryCount = 0;
+    DB::listen(function ($query) use (&$queryCount) {
+        if (
+            str_starts_with(strtolower(trim($query->sql)), "select")
+            && str_contains($query->sql, "authors")
+        ) {
+            $queryCount++;
+        }
+    });
+
+    (new AuthorWithTtl)->get();
+
+    expect($authors)->toHaveCount(10);
+    expect($queryCount)->toBeGreaterThan(
+        0,
+        "Expected the per-model TTL to expire the cache despite a much longer global TTL",
+    );
+});

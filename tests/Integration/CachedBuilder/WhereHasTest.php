@@ -1,177 +1,132 @@
-<?php namespace GeneaLabs\LaravelModelCaching\Tests\Integration\CachedBuilder;
+<?php
 
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\Author;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\Book;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\BookWithUncachedStore;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\Profile;
 use GeneaLabs\LaravelModelCaching\Tests\Fixtures\UncachedAuthor;
-use GeneaLabs\LaravelModelCaching\Tests\IntegrationTestCase;
-use ReflectionMethod;
 
-class WhereHasTest extends IntegrationTestCase
-{
-    public function testWhereHasClause()
-    {
-        $authors = (new Author)
-            ->whereHas("books")
-            ->get();
-        $uncachedAuthors = (new UncachedAuthor)
-            ->whereHas("books")
-            ->get();
+test('where has clause', function () {
+    $authors = (new Author)
+        ->whereHas("books")
+        ->get();
+    $uncachedAuthors = (new UncachedAuthor)
+        ->whereHas("books")
+        ->get();
 
-        $this->assertEquals($authors->pluck("id"), $uncachedAuthors->pluck("id"));
-    }
+    expect($uncachedAuthors->pluck("id"))->toEqual($authors->pluck("id"));
+});
 
-    public function testCountedWhereHasClause()
-    {
-        $authors = (new Author)
-            ->whereHas("books", null, ">=", 2)
-            ->get();
-        $uncachedAuthors = (new UncachedAuthor)
-            ->whereHas("books", null, ">=", 2)
-            ->get();
+test('counted where has clause', function () {
+    $authors = (new Author)
+        ->whereHas("books", null, ">=", 2)
+        ->get();
+    $uncachedAuthors = (new UncachedAuthor)
+        ->whereHas("books", null, ">=", 2)
+        ->get();
 
-        $this->assertEquals($authors->pluck("id"), $uncachedAuthors->pluck("id"));
-    }
+    expect($uncachedAuthors->pluck("id"))->toEqual($authors->pluck("id"));
+});
 
-    public function testNestedWhereHasClauses()
-    {
-        $authors = (new Author)
-            ->where("id", ">", 0)
-            ->whereHas("books", function ($query) {
-                $query->whereNull("description");
-            })
-            ->get();
-        $uncachedAuthors = (new UncachedAuthor)
-            ->where("id", ">", 0)
-            ->whereHas("books", function ($query) {
-                $query->whereNull("description");
-            })
-            ->get();
+test('nested where has clauses', function () {
+    $authors = (new Author)
+        ->where("id", ">", 0)
+        ->whereHas("books", function ($query) {
+            $query->whereNull("description");
+        })
+        ->get();
+    $uncachedAuthors = (new UncachedAuthor)
+        ->where("id", ">", 0)
+        ->whereHas("books", function ($query) {
+            $query->whereNull("description");
+        })
+        ->get();
 
-        $this->assertEquals($authors->pluck("id"), $uncachedAuthors->pluck("id"));
-    }
+    expect($uncachedAuthors->pluck("id"))->toEqual($authors->pluck("id"));
+});
 
-    public function testNonCachedRelationshipPreventsCaching()
-    {
-        $book = (new BookWithUncachedStore)
-            ->with("uncachedStores")
-            ->whereHas("uncachedStores")
-            ->get()
-            ->first();
-        $store = $book->uncachedStores->first();
-        $store->name = "Waterstones";
-        $store->save();
-        $results = $this->cache()->tags([
-                "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesbook",
-                "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesuncachedstore",
-                "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:books",
-            ])
-            ->get(sha1(
-                "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:books:genealabslaravelmodelcachingtestsfixturesbook-exists-" .
-                "and_books.id_=_book_store.book_id-testing:{$this->testingSqlitePath}testing.sqlite:uncachedStores"
-            ));
+test('non cached relationship prevents caching', function () {
+    $book = (new BookWithUncachedStore)
+        ->with("uncachedStores")
+        ->whereHas("uncachedStores")
+        ->get()
+        ->first();
+    $store = $book->uncachedStores->first();
+    $store->name = "Waterstones";
+    $store->save();
+    $results = $this->cache()->tags([
+            "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesbook",
+            "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturesuncachedstore",
+            "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:books",
+        ])
+        ->get(sha1(
+            "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:books:genealabslaravelmodelcachingtestsfixturesbook-exists-" .
+            "and_books.id_=_book_store.book_id-testing:{$this->testingSqlitePath}testing.sqlite:uncachedStores"
+        ));
 
-        $this->assertNull($results);
-    }
+    expect($results)->toBeNull();
+});
 
-    private function cacheKey($query) : string
-    {
-        return (new ReflectionMethod($query, "makeCacheKey"))
-            ->invoke($query);
-    }
+test('where has cache is busted when related table is written', function () {
+    $author = Author::factory()->create(["name" => "John"]);
+    Book::factory()->create(["author_id" => $author->id]);
 
-    /**
-     * Assert the query cached its result under exactly the given tags.
-     *
-     * An emptied result after a write is not evidence on its own: a query that
-     * stopped caching altogether returns the same thing. Laravel's TagSet
-     * namespaces an entry by the tags it was written with, so reading it back
-     * under the expected list is what pins the tag actually used.
-     */
-    private function assertCachedUnderTags($query, array $tags) : void
-    {
-        $key = sha1($this->cacheKey($query));
-        $query->get();
+    assertCachedUnderTags(
+        (new Book)->whereHas("author", function ($query) {
+            $query->where("name", "John");
+        }),
+        [
+            tag("genealabslaravelmodelcachingtestsfixturesbook"),
+            tag("books"),
+            tag("authors"),
+        ],
+    );
 
-        $this->assertNotNull(
-            $this->cache()
-                ->tags($tags)
-                ->get($key),
-            "The query was not cached under the expected tags.",
-        );
-    }
+    $query = fn () => (new Book)
+        ->whereHas("author", function ($query) {
+            $query->where("name", "John");
+        })
+        ->get();
 
-    private function tag(string $name) : string
-    {
-        return "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:{$name}";
-    }
+    expect($query())->not->toBeEmpty();
 
-    public function testWhereHasCacheIsBustedWhenRelatedTableIsWritten()
-    {
-        $author = Author::factory()->create(["name" => "John"]);
-        Book::factory()->create(["author_id" => $author->id]);
+    $author->name = "Jane";
+    $author->save();
 
-        $this->assertCachedUnderTags(
-            (new Book)->whereHas("author", function ($query) {
-                $query->where("name", "John");
-            }),
-            [
-                $this->tag("genealabslaravelmodelcachingtestsfixturesbook"),
-                $this->tag("books"),
-                $this->tag("authors"),
-            ],
-        );
+    expect($query())->toBeEmpty();
+});
 
-        $query = fn () => (new Book)
-            ->whereHas("author", function ($query) {
-                $query->where("name", "John");
-            })
-            ->get();
+test('nested where has cache is busted when deeply related table is written', function () {
+    $author = Author::factory()->create(["name" => "John"]);
+    $profile = Profile::factory()->create(["author_id" => $author->id, "first_name" => "Alpha"]);
+    Book::factory()->create(["author_id" => $author->id]);
 
-        $this->assertNotEmpty($query());
+    assertCachedUnderTags(
+        (new Book)->whereHas("author", function ($query) {
+            $query->whereHas("profile", function ($query) {
+                $query->where("first_name", "Alpha");
+            });
+        }),
+        [
+            tag("genealabslaravelmodelcachingtestsfixturesbook"),
+            tag("books"),
+            tag("authors"),
+            tag("profiles"),
+        ],
+    );
 
-        $author->name = "Jane";
-        $author->save();
+    $query = fn () => (new Book)
+        ->whereHas("author", function ($query) {
+            $query->whereHas("profile", function ($query) {
+                $query->where("first_name", "Alpha");
+            });
+        })
+        ->get();
 
-        $this->assertEmpty($query());
-    }
+    expect($query())->not->toBeEmpty();
 
-    public function testNestedWhereHasCacheIsBustedWhenDeeplyRelatedTableIsWritten()
-    {
-        $author = Author::factory()->create(["name" => "John"]);
-        $profile = Profile::factory()->create(["author_id" => $author->id, "first_name" => "Alpha"]);
-        Book::factory()->create(["author_id" => $author->id]);
+    $profile->first_name = "Beta";
+    $profile->save();
 
-        // The `profiles` tag is the whole point: it is two relations away from
-        // the queried model, and only the recursive walk reaches it.
-        $this->assertCachedUnderTags(
-            (new Book)->whereHas("author", function ($query) {
-                $query->whereHas("profile", function ($query) {
-                    $query->where("first_name", "Alpha");
-                });
-            }),
-            [
-                $this->tag("genealabslaravelmodelcachingtestsfixturesbook"),
-                $this->tag("books"),
-                $this->tag("authors"),
-                $this->tag("profiles"),
-            ],
-        );
-
-        $query = fn () => (new Book)
-            ->whereHas("author", function ($query) {
-                $query->whereHas("profile", function ($query) {
-                    $query->where("first_name", "Alpha");
-                });
-            })
-            ->get();
-
-        $this->assertNotEmpty($query());
-
-        $profile->first_name = "Beta";
-        $profile->save();
-
-        $this->assertEmpty($query());
-    }
-}
+    expect($query())->toBeEmpty();
+});

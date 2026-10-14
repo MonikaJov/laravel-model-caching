@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace GeneaLabs\LaravelModelCaching\Cache;
 
+use DateInterval;
+use DateTimeInterface;
 use Illuminate\Cache\DynamoDbStore;
 use Illuminate\Cache\RedisStore;
 use Illuminate\Cache\RedisTagSet;
@@ -20,7 +22,7 @@ use Throwable;
 class ModelCacheRepository
 {
     protected const DYNAMODB_NAMESPACE_PREFIX = 'genealabs:laravel-model-caching:dynamodb:v1:';
-
+    protected const KEY_PREFIX = 'genealabs:laravel-model-caching:';
     public const SERIALIZED_VALUE_PREFIX = 'genealabs:lmc:v1:serialized:';
 
     public function __construct(
@@ -64,20 +66,27 @@ class ModelCacheRepository
 
     public function get(string $key, array $tags = [], bool $hash = false): mixed
     {
-        $cached = $this->repositoryFor(tags: $tags)->get(key: $this->itemKey(key: $key, tags: $tags, hash: $hash));
+        $itemKey = $this->itemKey(key: $key, tags: $tags, hash: $hash);
 
-        if (! is_string(value: $cached)) {
-            return $cached;
-        }
+        return $this->unwrap(cached: $this->repositoryFor(tags: $tags)->get(key: $itemKey));
+    }
 
-        if (! str_starts_with(haystack: $cached, needle: static::SERIALIZED_VALUE_PREFIX)) {
-            return $cached;
-        }
+    public function remember(
+        string $key,
+        array $tags,
+        DateTimeInterface|DateInterval|int $ttl,
+        callable $callback,
+        bool $hash = false,
+    ): mixed {
+        $prefix = static::SERIALIZED_VALUE_PREFIX;
 
-        return unserialize(
-            data: substr(string: $cached, offset: strlen(string: static::SERIALIZED_VALUE_PREFIX)),
-            options: ["allowed_classes" => true],
-        );
+        return $this->unwrap(cached: $this->repositoryFor(tags: $tags)->remember(
+            key: $this->itemKey(key: $key, tags: $tags, hash: $hash),
+            ttl: $ttl,
+            callback: static function () use ($callback, $prefix): string {
+                return $prefix . serialize(value: $callback());
+            },
+        ));
     }
 
     public function rememberForever(
@@ -97,16 +106,21 @@ class ModelCacheRepository
             ? $repository->remember(key: $itemKey, ttl: $this->ttl, callback: $wrappedCallback)
             : $repository->rememberForever(key: $itemKey, callback: $wrappedCallback);
 
+        return $this->unwrap(cached: $cached);
+    }
+
+    protected function unwrap(mixed $cached): mixed
+    {
         if (! is_string(value: $cached)) {
             return $cached;
         }
 
-        if (! str_starts_with(haystack: $cached, needle: $prefix)) {
+        if (! str_starts_with(haystack: $cached, needle: static::SERIALIZED_VALUE_PREFIX)) {
             return $cached;
         }
 
         return unserialize(
-            data: substr(string: $cached, offset: strlen(string: $prefix)),
+            data: substr(string: $cached, offset: strlen(string: static::SERIALIZED_VALUE_PREFIX)),
             options: ["allowed_classes" => true],
         );
     }
@@ -135,9 +149,10 @@ class ModelCacheRepository
             return;
         }
 
-        foreach ($this->normalizeTags($tags) as $tag) {
-            $this->repository->forever($this->tagVersionKey($tag), $this->freshVersion());
-        }
+        collect($this->normalizeTags($tags))
+            ->each(function (string $tag): void {
+                $this->repository->forever($this->tagVersionKey($tag), $this->freshVersion());
+            });
     }
 
     protected function flushTaggedCache(Repository|TaggedCache $repository): void
@@ -196,10 +211,7 @@ class ModelCacheRepository
 
         $store = $this->repository->getStore();
 
-        if (
-            $store instanceof RedisStore
-            && $store->getPrefix() !== ''
-        ) {
+        if ($store instanceof RedisStore) {
             $this->flushRedisStoreByPrefix($store);
 
             return;
@@ -213,48 +225,70 @@ class ModelCacheRepository
         $connection = $store->connection();
         $client = $connection->client();
 
-        // Redis layers two independent prefixes: the connection-level client
-        // prefix (phpredis OPT_PREFIX / Predis KeyPrefixProcessor, from
-        // database.redis.options.prefix) and the cache-store prefix
-        // ($store->getPrefix()). A raw SCAN returns absolute keys that already
-        // include the client prefix, while DEL re-applies it — so we neutralize
-        // the client prefix for the duration and work in absolute keys, which
-        // is deterministic across both clients and their SCAN-prefix quirks.
         [$clientPrefix, $restoreClientPrefix] = $this->neutralizeClientPrefix($client);
 
         try {
-            $pattern = $clientPrefix . $store->getPrefix() . '*';
-            // The initial SCAN cursor differs by client: phpredis (with
-            // SCAN_RETRY) treats 0 as "iteration complete" and needs null, while
-            // Predis rejects null with "ERR invalid cursor" and needs 0.
-            $cursor = $client instanceof ClientInterface ? 0 : null;
+            $storePrefix = $clientPrefix . $store->getPrefix();
+            $escapedStorePrefix = addcslashes($storePrefix, '*?[]^\\');
+            $tagSetPattern = $escapedStorePrefix . 'tag:' . static::KEY_PREFIX . '*:entries';
 
-            do {
-                $result = $connection->scan($cursor, ['match' => $pattern, 'count' => 1000]);
+            foreach ($this->scanRedisKeys($connection, $client, $tagSetPattern) as $tagSetKeys) {
+                collect($tagSetKeys)
+                    ->each(function (string $tagSetKey) use ($connection, $storePrefix): void {
+                        $this->deleteTaggedEntries($connection, $tagSetKey, $storePrefix);
+                    });
+            }
 
-                if ($result === false) {
-                    break;
-                }
+            $packageKeyPattern = $escapedStorePrefix . '*' . static::KEY_PREFIX . '*';
 
-                [$cursor, $keys] = $result;
-
-                if (is_array($keys) && $keys !== []) {
-                    $this->deleteRedisKeys($connection, $keys);
-                }
-            } while ((int) $cursor !== 0);
+            foreach ($this->scanRedisKeys($connection, $client, $packageKeyPattern) as $keys) {
+                $this->deleteRedisKeys($connection, $keys);
+            }
         } finally {
             $restoreClientPrefix();
         }
     }
 
-    /**
-     * Disable the connection's client-level key prefix and return the prefix
-     * string alongside a callback that restores it. Supports phpredis
-     * (\Redis / \RedisCluster) and Predis; returns an empty prefix and a no-op
-     * restorer for any other client.
-     *
-     * @return array{0: string, 1: callable}
-     */
+    protected function scanRedisKeys($connection, object $client, string $pattern): \Generator
+    {
+        $cursor = $client instanceof ClientInterface ? 0 : null;
+
+        do {
+            $result = $connection->scan($cursor, ['match' => $pattern, 'count' => 1000]);
+
+            if ($result === false) {
+                break;
+            }
+
+            [$cursor, $keys] = $result;
+
+            if (is_array($keys) && $keys !== []) {
+                yield $keys;
+            }
+        } while ((int) $cursor !== 0);
+    }
+
+    protected function deleteTaggedEntries($connection, string $tagSetKey, string $storePrefix): void
+    {
+        $start = 0;
+
+        do {
+            $members = $connection->zrange($tagSetKey, $start, $start + 999);
+            $members = is_array($members) ? $members : [];
+
+            if ($members !== []) {
+                $this->deleteRedisKeys(
+                    $connection,
+                    collect($members)
+                        ->map(fn (string $member): string => $storePrefix . $member)
+                        ->all(),
+                );
+            }
+
+            $start += 1000;
+        } while (count($members) === 1000);
+    }
+
     protected function neutralizeClientPrefix(object $client): array
     {
         if ($client instanceof ClientInterface) {
@@ -275,7 +309,6 @@ class ModelCacheRepository
             ];
         }
 
-        // \Redis and \RedisCluster expose the prefix under the same option id.
         $option = \Redis::OPT_PREFIX;
         $original = (string) $client->getOption($option);
         $client->setOption($option, '');
@@ -297,11 +330,10 @@ class ModelCacheRepository
                 throw $exception;
             }
 
-            // A batched DEL spanning hash slots is rejected on a cluster; fall
-            // back to per-key deletion, mirroring flushTaggedCacheBySlot().
-            foreach ($keys as $key) {
-                $connection->del($key);
-            }
+            collect($keys)
+                ->each(function (string $key) use ($connection): void {
+                    $connection->del($key);
+                });
         }
     }
 
@@ -330,16 +362,13 @@ class ModelCacheRepository
 
     protected function versionedKey(string $key, array $tags): string
     {
-        // DynamoDB control keys are bounded: one global namespace key plus one
-        // key per normalized tag hash. Query entries are the only records that
-        // accumulate until TTL removes them.
-        $versions = [$this->currentVersion($this->globalVersionKey())];
+        $versions = collect([$this->globalVersionKey()])
+            ->merge(collect($this->normalizeTags($tags))
+                ->map(fn (string $tag): string => $this->tagVersionKey($tag)))
+            ->map(fn (string $versionKey): string => $this->currentVersion($versionKey))
+            ->implode(':');
 
-        foreach ($this->normalizeTags($tags) as $tag) {
-            $versions[] = $this->currentVersion($this->tagVersionKey($tag));
-        }
-
-        return $key . ':versions:' . implode(':', $versions);
+        return $key . ':versions:' . $versions;
     }
 
     protected function currentVersion(string $versionKey): string
@@ -362,17 +391,16 @@ class ModelCacheRepository
 
     protected function tagVersionKey(string $tag): string
     {
-        // Hashing keeps control keys short and stable even for long or
-        // punctuation-heavy tag strings. Namespace collisions are therefore
-        // limited to theoretical SHA-1 collisions.
         return static::DYNAMODB_NAMESPACE_PREFIX . 'tag-version:' . sha1($tag);
     }
 
     protected function normalizeTags(array $tags): array
     {
-        $tags = array_values(array_unique(array_filter($tags)));
-        sort($tags);
-
-        return $tags;
+        return collect($tags)
+            ->filter()
+            ->uniqueStrict()
+            ->sort()
+            ->values()
+            ->all();
     }
 }
