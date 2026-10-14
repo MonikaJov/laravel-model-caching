@@ -8,6 +8,7 @@ test('eagerloaded relationship', function () {
     $tags = [
         "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturespost",
         "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturestag",
+        "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:taggables",
         "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:posts",
     ];
 
@@ -35,6 +36,7 @@ test('lazyloaded relationship', function () {
     $tags = [
         "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturespost",
         "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:genealabslaravelmodelcachingtestsfixturestag",
+        "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:taggables",
         "genealabs:laravel-model-caching:testing:{$this->testingSqlitePath}testing.sqlite:posts",
     ];
 
