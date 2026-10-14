@@ -90,6 +90,13 @@ trait ModelCaching
         parent::__set($key, $value);
     }
 
+    public function getModelCacheTtlSeconds(): ?int
+    {
+        return property_exists($this, "cacheTtlSeconds")
+            ? $this->cacheTtlSeconds
+            : null;
+    }
+
     public static function all($columns = ['*']): EloquentCollection
     {
         $class = get_called_class();
