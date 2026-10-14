@@ -10,6 +10,7 @@ use GeneaLabs\LaravelModelCaching\Cache\ModelCacheRepository;
 use GeneaLabs\LaravelModelCaching\CachedBuilder;
 use GeneaLabs\LaravelModelCaching\CacheKey;
 use GeneaLabs\LaravelModelCaching\CacheTags;
+use GeneaLabs\LaravelModelCaching\Exceptions\UnkeyableValueException;
 use Illuminate\Cache\TaggableStore;
 use Illuminate\Contracts\Cache\Factory as CacheFactory;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
@@ -34,7 +35,7 @@ trait Caching
         'Predis\\Connection\\ConnectionException',
     ];
     protected static ?\WeakMap $modelCacheRepositories = null;
-    protected $isCachable = true;
+    protected bool $isCachable = true;
     protected $scopesAreApplied = false;
     protected $macroKey = "";
     protected $withoutGlobalScopes = [];
@@ -303,6 +304,20 @@ trait Caching
             $model = $this->getModel();
         }
 
+        $query = $this->cacheKeyQuery();
+
+        try {
+            return (new CacheKey($eagerLoad, $model, $query, $this->macroKey, $this->withoutGlobalScopes, $this->withoutAllGlobalScopes))
+                ->make($columns, $idColumn, $keyDifferentiator);
+        } catch (UnkeyableValueException) {
+            $this->disableModelCaching();
+
+            return "";
+        }
+    }
+
+    protected function cacheKeyQuery(): mixed
+    {
         $query = $this->query
             ?? Container::getInstance()
                 ->make("db")
@@ -315,13 +330,29 @@ trait Caching
             $query = $this->query->getQuery();
         }
 
-        return (new CacheKey($eagerLoad, $model, $query, $this->macroKey, $this->withoutGlobalScopes, $this->withoutAllGlobalScopes))
-            ->make($columns, $idColumn, $keyDifferentiator);
+        return $query;
+    }
+
+    protected function cacheEagerLoads(): array
+    {
+        return match (true) {
+            $this instanceof Relation => $this->getQuery()->getEagerLoads(),
+            default => $this->eagerLoad ?? [],
+        };
+    }
+
+    protected function eagerLoadingModel(): mixed
+    {
+        return match (true) {
+            $this instanceof Relation => $this->getRelated(),
+            property_exists($this, "model") => $this->model,
+            default => null,
+        };
     }
 
     protected function makeCacheTags(): array
     {
-        $eagerLoad = $this->eagerLoad ?? [];
+        $eagerLoad = $this->cacheEagerLoads();
         $model = $this->getModel() instanceof Model
             ? $this->getModel()
             : $this;
@@ -551,22 +582,18 @@ trait Caching
 
         $allRelationshipsAreCachable = true;
 
-        if (
-            property_exists($this, "eagerLoad")
-            && $this->eagerLoad
-        ) {
-            $allRelationshipsAreCachable = collect($this
-                ->eagerLoad)
+        if ($this->cacheEagerLoads()) {
+            $allRelationshipsAreCachable = collect($this->cacheEagerLoads())
                 ->keys()
                 ->reduce(function ($carry, $related) {
                     if (
-                        ! $this->modelHasRelation($this->model, $related)
+                        ! $this->modelHasRelation($this->eagerLoadingModel(), $related)
                         || $carry === false
                     ) {
                         return $carry;
                     }
 
-                    $relatedModel = $this->model->$related()->getRelated();
+                    $relatedModel = $this->eagerLoadingModel()->$related()->getRelated();
 
                     if (
                         ! method_exists($relatedModel, "isCachable")

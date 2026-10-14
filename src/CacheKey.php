@@ -6,13 +6,19 @@ namespace GeneaLabs\LaravelModelCaching;
 
 use BackedEnum;
 use DateTimeInterface;
+use GeneaLabs\LaravelModelCaching\Exceptions\UnkeyableValueException;
 use GeneaLabs\LaravelModelCaching\Traits\CachePrefixing;
 use Illuminate\Contracts\Database\Query\Expression;
+use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
+use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
+use JsonSerializable;
 use Ramsey\Uuid\Uuid;
+use ReflectionReference;
+use SplObjectStorage;
 use Stringable;
 use Throwable;
 use UnitEnum;
@@ -42,6 +48,23 @@ class CacheKey
         "wheres",
     ];
 
+    protected string $afterQueryProperty = "\0*\0afterQueryCallbacks";
+
+    protected array $unkeyedEagerState = [
+        "\0*\0joinedSubqueryTables",
+        "\0*\0model",
+        "\0*\0parent",
+        "\0*\0pivotWhereBetweens",
+        "\0*\0pivotWhereIns",
+        "\0*\0pivotWhereNulls",
+        "\0*\0pivotWheres",
+        "\0*\0query",
+        "\0*\0related",
+        "\0*\0relatedSubqueryTables",
+        "\0*\0withoutAllGlobalScopes",
+        "wheres",
+    ];
+
     private const UNKEYED_INFRASTRUCTURE_PROPERTIES = [
         "bindings",
         "bitwiseOperators",
@@ -59,6 +82,8 @@ class CacheKey
     protected $query;
     protected $withoutGlobalScopes = [];
     protected $withoutAllGlobalScopes = false;
+    protected ?string $unkeyableMarker = null;
+    protected bool $hasUnkeyableBinding = false;
 
     public function __construct(
         array $eagerLoad,
@@ -102,6 +127,8 @@ class CacheKey
         $key .= $keyDifferentiator;
         $key .= $this->macroKey;
 
+        throw_if($this->hasUnkeyableSegment($key), UnkeyableValueException::class);
+
         return $key;
     }
 
@@ -117,9 +144,10 @@ class CacheKey
             $query = clone $this->query;
             $sql = $query->toSql();
 
-            return "-beforeQuery_" . sha1($sql . $this->encodeForKeyHash($query->getBindings()));
+            return "-beforeQuery_"
+                . sha1($sql . $this->encodeBindingsForKeyHash($query->getBindings()));
         } catch (Throwable) {
-            return "";
+            return $this->unkeyableMarker();
         }
     }
 
@@ -128,6 +156,51 @@ class CacheKey
         $encoded = json_encode($value);
 
         return $encoded === false ? serialize($value) : $encoded;
+    }
+
+    protected function encodeBindingsForKeyHash(array $bindings) : string
+    {
+        return $this->encodeForKeyHash(collect($bindings)
+            ->map($this->keyableBinding(...))
+            ->all());
+    }
+
+    protected function keyableBinding(mixed $binding) : mixed
+    {
+        return match (true) {
+            $this->isResource($binding) => $this->unkeyableBinding(),
+            ! $this->hidesStateFromJson($binding) => $binding,
+            $binding instanceof Stringable => (string) $binding,
+            default => $this->unkeyableBinding(),
+        };
+    }
+
+    protected function unkeyableBinding() : null
+    {
+        $this->hasUnkeyableBinding = true;
+
+        return null;
+    }
+
+    protected function hidesStateFromJson(mixed $value) : bool
+    {
+        if (
+            ! is_object($value)
+            || $value instanceof JsonSerializable
+            || $value instanceof DateTimeInterface
+        ) {
+            return false;
+        }
+
+        $names = collect(get_mangled_object_vars($value))->keys();
+
+        return $names->isEmpty()
+            || $names->contains(fn (int|string $name) => str_starts_with((string) $name, "\0"));
+    }
+
+    protected function isResource(mixed $value) : bool
+    {
+        return str_starts_with(gettype($value), "resource");
     }
 
     protected function getBindingsSlug() : string
@@ -362,7 +435,7 @@ class CacheKey
             ->map(fn ($union) => (data_get($union, "all") ? "all_" : "")
                 . sha1(
                     $union["query"]->toSql()
-                    . $this->encodeForKeyHash($union["query"]->getBindings())
+                    . $this->encodeBindingsForKeyHash($union["query"]->getBindings())
                 ))
             ->implode("_");
 
@@ -521,7 +594,9 @@ class CacheKey
         $clause = array_shift($segments);
 
         foreach ($segments as $segment) {
-            $clause .= $this->getCurrentBinding("where") . $segment;
+            $binding = $this->getCurrentBinding("where");
+            $clause .= ($this->isResource($binding) ? $this->unkeyableMarker() : $binding)
+                . $segment;
             $this->currentBinding++;
         }
 
@@ -548,7 +623,7 @@ class CacheKey
         if ($from instanceof Expression) {
             $from = "sub-" . sha1(
                 $this->expressionToString($from)
-                    . $this->encodeForKeyHash($this->query->bindings["from"] ?? []),
+                    . $this->encodeBindingsForKeyHash($this->query->bindings["from"] ?? []),
             );
         }
 
@@ -704,20 +779,115 @@ class CacheKey
             $relation = $freshModel->$related();
             $baseWheres   = $relation->getQuery()->getQuery()->wheres ?? [];
             $baseBindings = $relation->getQuery()->getQuery()->bindings['where'] ?? [];
+            $baseState = $this->getEagerLoadState($relation);
             $constraint($relation);
             $afterWheres   = $relation->getQuery()->getQuery()->wheres ?? [];
             $afterBindings = $relation->getQuery()->getQuery()->bindings['where'] ?? [];
             $addedWheres   = array_slice($afterWheres,   count($baseWheres));
             $addedBindings = array_slice($afterBindings, count($baseBindings));
+            $changedStateKey = $this->getChangedStateKey($relation, $baseState);
 
             if (empty($addedWheres)) {
-                return "";
+                return $changedStateKey;
             }
 
-            return "=" . sha1($this->encodeForKeyHash($addedWheres) . $this->encodeForKeyHash($addedBindings));
+            return "=" . sha1($this->encodeForKeyHash($addedWheres)
+                . $this->encodeBindingsForKeyHash($addedBindings))
+                . $changedStateKey;
         } catch (Throwable) {
+            return $this->unkeyableMarker();
+        }
+    }
+
+    protected function getEagerLoadState(Relation $relation) : array
+    {
+        $query = $relation->getBaseQuery();
+
+        return [
+            "relation" => $this->getKeyedState($relation),
+            "builder" => $this->getKeyedState($relation->getQuery()),
+            "query" => Collection::make($this->getKeyedState($query))
+                ->except(self::UNKEYED_INFRASTRUCTURE_PROPERTIES)
+                ->all(),
+            "sql" => $this->getSqlWithoutWheres($query),
+        ];
+    }
+
+    protected function getKeyedState(object $value) : array
+    {
+        return Collection::make(get_mangled_object_vars($value))
+            ->except($this->unkeyedEagerState)
+            ->all();
+    }
+
+    protected function getSqlWithoutWheres(QueryBuilder $query) : ?string
+    {
+        try {
+            $query = clone $query;
+            $query->wheres = [];
+            $query->bindings["where"] = [];
+
+            return $query->toSql() . $this->encodeBindingsForKeyHash($query->getBindings());
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    protected function getChangedStateKey(Relation $relation, array $baseState) : string
+    {
+        $state = $this->getEagerLoadState($relation);
+
+        if ($state === $baseState) {
             return "";
         }
+
+        $builder = $relation->getQuery();
+        $nestedEagerLoads = $this->getNestedEagerLoadsSlug($builder);
+
+        if (
+            $nestedEagerLoads === null
+            || $this->changesAfterQueryCallbacks($state, $baseState)
+        ) {
+            return $this->unkeyableMarker();
+        }
+
+        $scoped = $builder->applyScopes()
+            ->getQuery();
+        $objectState = $this->normalizeForHash([
+            data_get($state, "relation"),
+            data_get($state, "builder"),
+        ]);
+
+        return "+" . sha1($scoped->toSql()
+            . $this->encodeBindingsForKeyHash($scoped->getBindings())
+            . $this->encodeForKeyHash($objectState)
+            . $nestedEagerLoads);
+    }
+
+    protected function changesAfterQueryCallbacks(array $state, array $baseState) : bool
+    {
+        return Collection::make(["builder", "query"])
+            ->contains(function (string $part) use ($state, $baseState) {
+                $callbacks = data_get($state, [$part, $this->afterQueryProperty], []);
+                $baseCallbacks = data_get($baseState, [$part, $this->afterQueryProperty], []);
+
+                return $callbacks !== $baseCallbacks;
+            });
+    }
+
+    protected function getNestedEagerLoadsSlug(EloquentBuilder $builder) : ?string
+    {
+        $nested = new self(
+            $builder->getEagerLoads(),
+            $builder->getModel(),
+            $builder->getQuery(),
+            "",
+            [],
+            false,
+        );
+        $slug = $nested->getWithModels();
+
+        return $nested->hasUnkeyableSegment($slug) ? null : $slug;
     }
 
     protected function recursiveImplode(array $items, string $glue = ",") : string
@@ -743,6 +913,10 @@ class CacheKey
 
     private function stringifyBinding(mixed $binding) : string
     {
+        if ($this->isResource($binding)) {
+            return $this->unkeyableMarker();
+        }
+
         if ($binding instanceof DateTimeInterface) {
             $binding = $binding->format("Y-m-d-H-i-s");
         }
@@ -815,6 +989,8 @@ class CacheKey
             return $this->expressionToString($value);
         } elseif ($value instanceof DateTimeInterface) {
             return $value->format("Y-m-d-H-i-s");
+        } elseif ($this->isResource($value)) {
+            return $this->unkeyableMarker();
         }
 
         // An object with no string form cannot be interpolated below, and PHP
@@ -832,23 +1008,100 @@ class CacheKey
     // Collections holding different ids would share a key and one would be
     // served the other's rows. serialize() reads private state, so it separates
     // them, and it is stable across requests, which a key has to be.
-    //
-    // It throws on a Closure and on anything holding a PDO connection. There is
-    // no honest way to tell such a value from another of its class, so the
-    // fallback is unique per instance and never repeats: the key misses instead
-    // of returning rows that belong to a different query.
     private function hashOpaqueObject(object $value): string
     {
         try {
             $identity = serialize($value);
         } catch (Throwable) {
-            // this will increase cache writes but beats failing outright. Every
-            // value that matches before this will keep working so this is a worst
-            // case fallback and there is currently no "do not cache" signal
-            $identity = spl_object_hash($value);
+            return $this->unkeyableMarker();
         }
 
-        return $value::class . "-" . sha1($identity);
+        return match ($this->holdsResource($value, new SplObjectStorage, collect())) {
+            true => $this->unkeyableMarker(),
+            false => $value::class . "-" . sha1($identity),
+        };
+    }
+
+    protected function unkeyableMarker(): string
+    {
+        return $this->unkeyableMarker ??= "unkeyable" . Uuid::uuid4()
+            ->getHex();
+    }
+
+    protected function hasUnkeyableSegment(string $key): bool
+    {
+        return $this->hasUnkeyableBinding
+            || ($this->unkeyableMarker !== null
+                && str_contains($key, $this->unkeyableMarker));
+    }
+
+    protected function holdsResource(
+        mixed $value,
+        SplObjectStorage $seen,
+        Collection $references,
+    ): bool {
+        return match (true) {
+            is_array($value) => $this->arrayHoldsResource($value, $seen, $references),
+            is_object($value) => $this->objectHoldsResource($value, $seen, $references),
+            default => $value !== null
+                && ! is_scalar($value),
+        };
+    }
+
+    protected function arrayHoldsResource(
+        array $value,
+        SplObjectStorage $seen,
+        Collection $references,
+    ): bool {
+        return collect($value)
+            ->contains(fn (mixed $item, int|string $key) => $this
+                ->isFirstVisitOf(ReflectionReference::fromArrayElement($value, $key), $references)
+                && $this->holdsResource($item, $seen, $references));
+    }
+
+    protected function isFirstVisitOf(?ReflectionReference $reference, Collection $references): bool
+    {
+        $refId = $reference?->getId();
+        $isFirstVisit = $refId === null
+            || ! $references->has($refId);
+        $references->when($refId !== null, fn () => $references->put($refId, $reference));
+
+        return $isFirstVisit;
+    }
+
+    protected function objectHoldsResource(
+        object $value,
+        SplObjectStorage $seen,
+        Collection $references,
+    ): bool {
+        $isFirstVisit = ! $seen->offsetExists($value);
+        $seen->offsetSet($value);
+
+        return $isFirstVisit
+            && $this->holdsResource($this->serializedState($value), $seen, $references);
+    }
+
+    protected function serializedState(object $value): array
+    {
+        return match (true) {
+            method_exists($value, "__serialize") => $value->__serialize(),
+            method_exists($value, "__sleep") => $this->sleepingState($value),
+            default => get_mangled_object_vars($value),
+        };
+    }
+
+    protected function sleepingState(object $value): array
+    {
+        $sleeping = collect($value->__sleep())
+            ->map(fn (string $name) => Str::afterLast($name, "\0"));
+        $state = collect(get_mangled_object_vars($value));
+        $sleepingNames = $state
+            ->keys()
+            ->filter(fn (string $name) => $sleeping->contains(Str::afterLast($name, "\0")));
+
+        return $state
+            ->only($sleepingNames)
+            ->all();
     }
 
     private function processEnums(array $values, bool $escape = false): array

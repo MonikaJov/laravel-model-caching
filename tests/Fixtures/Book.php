@@ -59,6 +59,11 @@ class Book extends Model
         return $this->belongsToMany(Store::class);
     }
 
+    public function storesWithBooks() : BelongsToMany
+    {
+        return $this->belongsToMany(StoreWithBooks::class, "book_store", "book_id", "store_id");
+    }
+
     public function prefixedStores() : BelongsToMany
     {
         return $this->belongsToMany(PrefixedStore::class, "book_store", "book_id", "store_id");
@@ -67,5 +72,10 @@ class Book extends Model
     public function scopeStartsWith(Builder $query, string $startOfName) : Builder
     {
         return $query->where("title", "LIKE", "{$startOfName}%");
+    }
+
+    public function scopeTitledLike(Builder $query, string $title) : Builder
+    {
+        return $query->where(fn (Builder $query) => $query->where("title", "LIKE", $title));
     }
 }
