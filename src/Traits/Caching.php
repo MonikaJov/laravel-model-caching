@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GeneaLabs\LaravelModelCaching\Traits;
 
 use Aws\DynamoDb\Exception\DynamoDbException;
+use BackedEnum;
 use Closure;
 use GeneaLabs\LaravelModelCaching\Cache\ModelCacheRepository;
 use GeneaLabs\LaravelModelCaching\CachedBuilder;
@@ -25,21 +26,28 @@ use Illuminate\Database\Eloquent\Scope;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
+use JsonException;
+use RedisException;
 use ReflectionClass;
 use ReflectionMethod;
 use ReflectionNamedType;
 use ReflectionProperty;
+use Stringable;
+use Throwable;
+use UnitEnum;
+use WeakMap;
 
 trait Caching
 {
     protected static array $cacheConnectionExceptions = [
-        \RedisException::class,
+        RedisException::class,
         'Predis\\Connection\\ConnectionException',
     ];
-    protected static ?\WeakMap $modelCacheRepositories = null;
+    protected static ?WeakMap $modelCacheRepositories = null;
     protected bool $isCachable = true;
     protected $scopesAreApplied = false;
     protected $macroKey = "";
+    protected bool $hasUnkeyableMacroArgument = false;
     protected $withoutGlobalScopes = [];
     protected $withoutAllGlobalScopes = false;
 
@@ -52,11 +60,7 @@ trait Caching
             && $this->innerBuilder
             && method_exists($this->innerBuilder, $method)
         ) {
-            $this->macroKey .= "-{$method}";
-
-            if ($parameters) {
-                $this->macroKey .= $this->macroKeyArguments($parameters);
-            }
+            $this->appendMacroKey($method, $parameters);
 
             $result = $this->innerBuilder->{$method}(...$parameters);
             $this->flushCacheAfterForwardedWrite($method);
@@ -72,11 +76,7 @@ trait Caching
             isset($this->localMacros[$method])
             || (method_exists(static::class, 'hasGlobalMacro') && static::hasGlobalMacro($method))
         ) {
-            $this->macroKey .= "-{$method}";
-
-            if ($parameters) {
-                $this->macroKey .= $this->macroKeyArguments($parameters);
-            }
+            $this->appendMacroKey($method, $parameters);
         }
 
         $this->flushCacheAfterForwardedWrite($method);
@@ -105,29 +105,97 @@ trait Caching
         return $recorder->recordSubqueryCall($method, $parameters);
     }
 
+    protected function appendMacroKey(string $method, array $parameters): void
+    {
+        $this->macroKey .= "-{$method}";
+
+        if (! $parameters) {
+            return;
+        }
+
+        try {
+            $this->macroKey .= $this->macroKeyArguments($parameters);
+        } catch (UnkeyableValueException | JsonException) {
+            $this->hasUnkeyableMacroArgument = true;
+        }
+    }
+
     protected function macroKeyArguments(array $parameters): string
     {
-        return collect($parameters)
+        $arguments = collect($parameters)
             ->map(function ($parameter) {
                 if (is_array($parameter)) {
-                    return json_encode($parameter, JSON_PARTIAL_OUTPUT_ON_ERROR);
+                    return $this->keyableMacroArray($parameter);
                 }
 
-                if ($parameter instanceof \BackedEnum) {
+                if ($parameter instanceof BackedEnum) {
                     return $parameter->value;
                 }
 
-                if ($parameter instanceof \UnitEnum) {
+                if ($parameter instanceof UnitEnum) {
                     return $parameter->name;
                 }
 
-                if (is_object($parameter) && ! $parameter instanceof \Stringable) {
-                    return get_class($parameter);
+                if (
+                    $parameter instanceof QueryBuilder
+                    || $parameter instanceof Builder
+                    || $parameter instanceof Relation
+                ) {
+                    return $this->macroBuilderArgumentKey($parameter);
                 }
 
-                return $parameter;
+                throw_unless(
+                    $parameter === null
+                        || is_scalar($parameter)
+                        || $parameter instanceof Stringable,
+                    UnkeyableValueException::class,
+                );
+
+                return $parameter instanceof Stringable
+                    ? (string) $parameter
+                    : $parameter;
             })
-            ->implode("_");
+            ->all();
+
+        return json_encode($arguments, JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION, 1024);
+    }
+
+    protected function macroBuilderArgumentKey(QueryBuilder|Builder|Relation $builder): string
+    {
+        if ($builder instanceof Relation) {
+            $builder = $builder->getQuery();
+        }
+
+        $key = $builder instanceof Builder
+            ? new CacheKey($builder->getEagerLoads(), $builder->getModel(), $builder->toBase(), $this->builderArgumentMacroKey($builder), [], false)
+            : new CacheKey([], $this->cacheModel(), $builder, "", [], false);
+
+        return "builder:" . sha1($key->make());
+    }
+
+    protected function builderArgumentMacroKey(Builder $builder): string
+    {
+        return (fn () => method_exists($this, "keyableMacroKey") ? $this->keyableMacroKey() : "")
+            ->call($builder);
+    }
+
+    protected function keyableMacroArray(array $values, int $depth = 1): array
+    {
+        throw_if($depth > 512, UnkeyableValueException::class);
+
+        return array_map(fn ($value) => match (true) {
+            is_array($value) => $this->keyableMacroArray($value, $depth + 1),
+            $value instanceof Stringable && CacheKey::hidesStateFromJson($value) => (string) $value,
+            is_object($value) && ! $value instanceof Stringable && ! $value instanceof UnitEnum => throw new UnkeyableValueException,
+            default => $value,
+        }, $values);
+    }
+
+    protected function keyableMacroKey(): string
+    {
+        throw_if($this->hasUnkeyableMacroArgument, UnkeyableValueException::class);
+
+        return $this->macroKey;
     }
 
     protected function flushCacheAfterForwardedWrite(string $method): void
@@ -334,7 +402,7 @@ trait Caching
         $query = $this->cacheKeyQuery();
 
         try {
-            return (new CacheKey($eagerLoad, $model, $query, $this->macroKey, $this->withoutGlobalScopes, $this->withoutAllGlobalScopes))
+            return (new CacheKey($eagerLoad, $model, $query, $this->keyableMacroKey(), $this->withoutGlobalScopes, $this->withoutAllGlobalScopes))
                 ->make($columns, $idColumn, $keyDifferentiator);
         } catch (UnkeyableValueException) {
             $this->disableModelCaching();
@@ -573,7 +641,7 @@ trait Caching
     protected function modelCacheRepository(): ModelCacheRepository
     {
         static::$modelCacheRepositories
-            ??= new \WeakMap;
+            ??= new WeakMap;
 
         return static::$modelCacheRepositories[$this]
             ??= ModelCacheRepository::make();
@@ -723,7 +791,7 @@ trait Caching
             ->get("laravel-model-caching.fallback-to-database", false);
     }
 
-    public function isCacheConnectionException(\Throwable $exception): bool
+    public function isCacheConnectionException(Throwable $exception): bool
     {
         $isListedException = collect(static::$cacheConnectionExceptions)
             ->contains(fn (string $exceptionClass): bool => $exception instanceof $exceptionClass);
@@ -748,7 +816,7 @@ trait Caching
 
         try {
             return $operation();
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             if (! $this->shouldFallbackToDatabase() || ! $this->isCacheConnectionException($exception)) {
                 throw $exception;
             }
